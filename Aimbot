@@ -1,0 +1,1028 @@
+--// Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local Terrain = workspace.Terrain
+local TweenService = game:GetService("TweenService")
+
+setfpscap(999)
+
+--// CONFIG
+local cfg = {
+    targetPart="Head", lerpSpeed=0.12, teamCheck=true, wallCheck=true,
+    aimbotEnabled=true, silentAimEnabled=false, silentAimFOV=100,
+    fullLockEnabled=false, autoTargetEnabled=true, maxTargetDistance=400,
+    alwaysHeadshot=false, headshotChance=50, hitboxEnabled=false,
+    hitboxSize=10, hitboxTransparency=0.6, xrayEnabled=false,
+    rainbowGunEnabled=false, noRecoilEnabled=false, noSpreadEnabled=false,
+    fastFireRateEnabled=false, infiniteAmmoV1=false, infiniteAmmoV2=false,
+    brightSkinsEnabled=false, streamModeEnabled=false, noclipEnabled=false,
+    walkSpeed=16, defaultSpeed=16, fastSpeed=100, speedEnabled=false,
+    arsenalSpeedBypass=true, jumpPower=50, infiniteJumpEnabled=false,
+    espEnabled=true, espTracersEnabled=false, espSkeletonEnabled=false,
+    espNameEnabled=false, espDistanceEnabled=false, espHealthEnabled=false,
+    espDirectionEnabled=false, espTeamCheck=true, espTeamColor=true,
+    espDefaultColor=Color3.fromRGB(255,0,0), espRGBMode=false,
+    potatoMode=false, showPerformance=false, FOVRadius=50,
+    showFOVCircle=true, rgbSpeed=0.01, rgbBrightness=1,
+    rgbSaturation=1, rgbPulse=false
+}
+
+local antiLagOptions = {}
+for _,v in pairs({"disableGlobalShadows","disableBlur","disableSunRays","disableColorCorrection","disableAtmosphere","disableDepthOfField","disableParticles","lowQualityTextures","disableFog","disableWaterEffects","disableReflections","simplifyMaterials","removeDecals","removeGrass","reduceLightingQuality","disableCastShadows","noTextures","noDecals","noEffects","noAnimations"}) do
+    antiLagOptions[v] = false
+end
+
+local originalSettings, originalMaterials, originalLighting, originalTextures = {}, {}, {}, {}
+local originalAnimations, potatoBackup, originalProperties = {}, {}, {}
+local hitboxOriginalSizes, brightSkinsOriginalMaterials, espCache = {}, {}, {}
+local frameCount, lastFPSUpdate, currentFPS = 0, 0, 0
+local scriptStartTime = tick()
+local currentTarget, lastTargetEvaluation = nil, 0
+local noclipConnection, jumpConnection = nil, nil
+local espRGBHue, rgbHue = 0, 0
+
+local FOVring = Drawing.new("Circle")
+FOVring.Visible, FOVring.Thickness, FOVring.Color = true, 2, Color3.fromRGB(255, 140, 0)
+FOVring.Filled, FOVring.Radius = false, cfg.FOVRadius
+FOVring.Position = Camera.ViewportSize / 2
+
+local FOVringOutline = Drawing.new("Circle")
+FOVringOutline.Visible, FOVringOutline.Thickness = true, 3
+FOVringOutline.Color, FOVringOutline.Filled = Color3.fromRGB(75, 0, 130), false
+FOVringOutline.Radius, FOVringOutline.Position = cfg.FOVRadius + 2, Camera.ViewportSize / 2
+FOVringOutline.Transparency = 0.5
+
+local SilentFOV = Drawing.new("Circle")
+SilentFOV.Visible, SilentFOV.Thickness, SilentFOV.Color = false, 1, Color3.fromRGB(255, 0, 0)
+SilentFOV.Filled, SilentFOV.Radius = false, cfg.silentAimFOV
+SilentFOV.Position, SilentFOV.Transparency = Camera.ViewportSize / 2, 0.8
+
+local function updateFOVCircle()
+    local camViewportSize = Camera.ViewportSize
+    FOVring.Position, FOVringOutline.Position = camViewportSize / 2, camViewportSize / 2
+    FOVring.Radius, FOVringOutline.Radius = cfg.FOVRadius, cfg.FOVRadius + 2
+    SilentFOV.Position, SilentFOV.Radius = camViewportSize / 2, cfg.silentAimFOV
+end
+
+local function showNotification(text, color)
+    local notif = Drawing.new("Text")
+    notif.Visible, notif.Center, notif.Font = true, true, 2
+    notif.Color, notif.Text, notif.Size = color or Color3.fromRGB(255, 255, 255), text, 18
+    notif.Position = Vector2.new(Camera.ViewportSize.X / 2, 60)
+    spawn(function() wait(2.5) pcall(function() notif:Remove() end) end)
+end
+
+local function togglePotatoMode()
+    if cfg.potatoMode then
+        potatoBackup.GlobalShadows = Lighting.GlobalShadows
+        potatoBackup.Brightness = Lighting.Brightness
+        potatoBackup.FogEnd, potatoBackup.FogStart = Lighting.FogEnd, Lighting.FogStart
+        potatoBackup.QualityLevel = settings().Rendering.QualityLevel
+        Lighting.GlobalShadows, Lighting.Brightness = false, 2
+        Lighting.FogEnd, Lighting.FogStart = 9e9, 9e9
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        for _, obj in pairs(Lighting:GetChildren()) do
+            if obj:IsA("PostEffect") then
+                if not originalSettings[obj] then originalSettings[obj] = obj.Enabled end
+                obj.Enabled = false
+            end
+        end
+        for _, obj in pairs(workspace:GetDescendants()) do
+            if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+                if not originalSettings[obj] then originalSettings[obj] = obj.Enabled end
+                obj.Enabled = false
+            elseif obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
+                if not originalSettings[obj] then originalSettings[obj] = obj.Enabled end
+                obj.Enabled = false
+            elseif obj:IsA("BasePart") and not obj.Parent:FindFirstChild("Humanoid") then
+                if not originalMaterials[obj] then originalMaterials[obj] = obj.Material end
+                obj.Material, obj.CastShadow, obj.Reflectance = Enum.Material.SmoothPlastic, false, 0
+            elseif obj:IsA("Decal") or obj:IsA("Texture") then
+                if not originalSettings[obj] then originalSettings[obj] = obj.Transparency end
+                obj.Transparency = 1
+            end
+        end
+        Terrain.WaterWaveSize, Terrain.WaterWaveSpeed = 0, 0
+        Terrain.WaterReflectance, Terrain.WaterTransparency = 0, 1
+        showNotification("🥔 POTATO MODE: ON", Color3.fromRGB(255, 200, 0))
+    else
+        if potatoBackup.GlobalShadows ~= nil then
+            Lighting.GlobalShadows, Lighting.Brightness = potatoBackup.GlobalShadows, potatoBackup.Brightness
+            Lighting.FogEnd, Lighting.FogStart = potatoBackup.FogEnd, potatoBackup.FogStart
+            settings().Rendering.QualityLevel = potatoBackup.QualityLevel
+        end
+        for obj, value in pairs(originalSettings) do
+            if obj and obj.Parent then
+                pcall(function()
+                    if obj:IsA("PostEffect") or obj:IsA("ParticleEmitter") or obj:IsA("PointLight") then
+                        obj.Enabled = value
+                    elseif obj:IsA("Decal") or obj:IsA("Texture") then
+                        obj.Transparency = value
+                    end
+                end)
+            end
+        end
+        for obj, mat in pairs(originalMaterials) do
+            if obj and obj.Parent then
+                pcall(function() obj.Material, obj.CastShadow = mat, true end)
+            end
+        end
+        Terrain.WaterWaveSize, Terrain.WaterWaveSpeed = 1, 10
+        Terrain.WaterReflectance, Terrain.WaterTransparency = 1, 0.3
+        potatoBackup = {}
+        showNotification("POTATO MODE: OFF", Color3.fromRGB(100, 255, 100))
+    end
+end
+
+local function arsenalSpeedHack()
+    spawn(function()
+        while cfg.arsenalSpeedBypass do
+            wait(0.1)
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                local humanoid = LocalPlayer.Character.Humanoid
+                humanoid.WalkSpeed = cfg.walkSpeed
+                humanoid.Changed:Connect(function(prop)
+                    if cfg.arsenalSpeedBypass and prop == "WalkSpeed" and humanoid.WalkSpeed ~= cfg.walkSpeed then
+                        humanoid.WalkSpeed = cfg.walkSpeed
+                    end
+                end)
+                pcall(function()
+                    for _, v in pairs(getgc()) do
+                        if type(v) == "function" and getfenv(v).script and getfenv(v).script.Parent == LocalPlayer.Character then
+                            local constants = debug.getconstants(v)
+                            for i, const in pairs(constants) do
+                                if const == 16 or const == 14 then
+                                    debug.setconstant(v, i, cfg.walkSpeed)
+                                end
+                            end
+                        end
+                    end
+                end)
+                if humanoid.RootPart then
+                    local moveVector = humanoid.MoveDirection * (cfg.walkSpeed - 16)
+                    humanoid.RootPart.Velocity = humanoid.RootPart.Velocity + Vector3.new(moveVector.X, 0, moveVector.Z)
+                end
+            end
+        end
+    end)
+end
+
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+mt.__namecall = newcclosure(function(self, ...)
+    local args = {...}
+    local method = getnamecallmethod()
+    if cfg.silentAimEnabled and method == "FireServer" then
+        if self.Name == "FireServer" or self.Name == "Fire" or self.Name == "Shoot" then
+            local target = getClosestPlayerToMouse()
+            if target and target.Character and target.Character:FindFirstChild("Head") then
+                args[1] = target.Character.Head.Position
+            end
+        end
+    end
+    return oldNamecall(self, unpack(args))
+end)
+setreadonly(mt, true)
+
+function getClosestPlayerToMouse()
+    local closestPlayer, closestDistance = nil, cfg.silentAimFOV
+    local mousePos = UserInputService:GetMouseLocation()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            if cfg.teamCheck and player.Team == LocalPlayer.Team then continue end
+            local pos, onScreen = Camera:WorldToViewportPoint(player.Character.HumanoidRootPart.Position)
+            if onScreen then
+                local distance = (Vector2.new(pos.X, pos.Y) - mousePos).Magnitude
+                if distance < closestDistance then
+                    closestDistance, closestPlayer = distance, player
+                end
+            end
+        end
+    end
+    return closestPlayer
+end
+
+local function updateRGBGun()
+    if not cfg.rainbowGunEnabled then return end
+    local brightness = cfg.rgbBrightness
+    if cfg.rgbPulse then
+        brightness = cfg.rgbBrightness * (0.5 + 0.5 * math.sin(tick() * 3))
+    end
+    local currentColor = Color3.fromHSV(rgbHue, cfg.rgbSaturation, brightness)
+    if workspace.Camera:FindFirstChild("Arms") then
+        for _, v in pairs(workspace.Camera.Arms:GetDescendants()) do
+            if v:IsA("MeshPart") or v:IsA("BasePart") then
+                v.Color, v.Material = currentColor, Enum.Material.Neon
+                if v:FindFirstChild("Mesh") then
+                    v.Mesh.VertexColor = Vector3.new(currentColor.R, currentColor.G, currentColor.B)
+                end
+            end
+        end
+    end
+    if LocalPlayer.Character then
+        for _, tool in pairs(LocalPlayer.Character:GetChildren()) do
+            if tool:IsA("Tool") then
+                for _, part in pairs(tool:GetDescendants()) do
+                    if part:IsA("MeshPart") or part:IsA("BasePart") then
+                        part.Color, part.Material = currentColor, Enum.Material.Neon
+                        local pointLight = part:FindFirstChild("RGBLight")
+                        if not pointLight then
+                            pointLight = Instance.new("PointLight")
+                            pointLight.Name, pointLight.Parent = "RGBLight", part
+                        end
+                        pointLight.Color, pointLight.Brightness, pointLight.Range = currentColor, 2, 10
+                    end
+                end
+            end
+        end
+    end
+    rgbHue = rgbHue + cfg.rgbSpeed
+    if rgbHue > 1 then rgbHue = 0 end
+end
+
+local function getTargetPart()
+    if cfg.alwaysHeadshot then return "Head"
+    elseif math.random(1, 100) <= cfg.headshotChance then return "Head"
+    else return "HumanoidRootPart" end
+end
+
+local newVector2, newColor3 = Vector2.new, Color3.new
+local tan, rad = math.tan, math.rad
+local round = function(...) local a = {}; for i,v in next, table.pack(...) do a[i] = math.round(v); end return unpack(a); end
+local wtvp = function(...) local a, b = Camera.WorldToViewportPoint(Camera, ...) return newVector2(a.X, a.Y), b, a.Z end
+
+local skeletonConnections = {
+    {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},{"UpperTorso","LeftUpperArm"},
+    {"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},{"UpperTorso","RightUpperArm"},
+    {"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},{"LowerTorso","LeftUpperLeg"},
+    {"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},{"LowerTorso","RightUpperLeg"},
+    {"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"}
+}
+local r6SkeletonConnections = {
+    {"Head","Torso"},{"Torso","Left Arm"},{"Torso","Right Arm"},{"Torso","Left Leg"},{"Torso","Right Leg"}
+}
+
+local function createEsp(player)
+    local d = {box=Drawing.new("Square"),boxoutline=Drawing.new("Square"),tracer=Drawing.new("Line"),
+        name=Drawing.new("Text"),distance=Drawing.new("Text"),healthBar=Drawing.new("Square"),
+        healthBarOutline=Drawing.new("Square"),directionLine=Drawing.new("Line"),skeleton={}}
+    for k,v in pairs(d) do
+        if k~="skeleton" then
+            v.Visible = false
+            if k=="box" then v.Thickness,v.Filled,v.Color,v.ZIndex = 1,false,cfg.espDefaultColor,2
+            elseif k=="boxoutline" then v.Thickness,v.Filled,v.Color = 3,false,Color3.new(0,0,0)
+            elseif k:find("tracer") or k:find("direction") then 
+                v.Thickness,v.Color,v.Transparency = k:find("direction") and 2 or 1,cfg.espDefaultColor,1
+            elseif k:find("name") or k:find("distance") then 
+                v.Size,v.Center,v.Outline,v.Font = k:find("name") and 13 or 12,true,true,2 
+            end
+        end
+    end
+    for i=1,14 do
+        local l = Drawing.new("Line")
+        l.Thickness,l.Color,l.Visible,l.Transparency = 1,cfg.espDefaultColor,false,1
+        d.skeleton[i] = l
+    end
+    espCache[player] = d
+end
+
+local function removeEsp(player)
+    if rawget(espCache, player) then
+        for _, drawing in next, espCache[player] do
+            if type(drawing) == "table" then
+                for _, skelLine in next, drawing do skelLine:Remove() end
+            else drawing:Remove() end
+        end
+        espCache[player] = nil
+    end
+end
+
+local function updateEsp(player, esp)
+    local character = player and player.Character
+    if not character then
+        esp.box.Visible,esp.boxoutline.Visible,esp.tracer.Visible = false,false,false
+        esp.name.Visible,esp.distance.Visible = false,false
+        esp.healthBar.Visible,esp.healthBarOutline.Visible,esp.directionLine.Visible = false,false,false
+        for _, line in ipairs(esp.skeleton) do if line then line.Visible = false end end
+        return
+    end
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character:FindFirstChild("Humanoid")
+    if not humanoidRootPart or not humanoid then
+        esp.box.Visible,esp.boxoutline.Visible,esp.tracer.Visible = false,false,false
+        esp.name.Visible,esp.distance.Visible = false,false
+        esp.healthBar.Visible,esp.healthBarOutline.Visible,esp.directionLine.Visible = false,false,false
+        for _, line in ipairs(esp.skeleton) do if line then line.Visible = false end end
+        return
+    end
+    local position, visible, depth = wtvp(humanoidRootPart.Position)
+    esp.box.Visible = visible and cfg.espEnabled and not cfg.streamModeEnabled
+    esp.boxoutline.Visible = visible and cfg.espEnabled and not cfg.streamModeEnabled
+    if visible and cfg.espEnabled then
+        local scaleFactor = 1 / (depth * tan(rad(Camera.FieldOfView / 2)) * 2) * 1000
+        local width, height = round(2.5 * scaleFactor, 3.5 * scaleFactor)
+        local x, y = round(position.X, position.Y)
+        local boxPos = newVector2(round(x - width / 2, y - height / 2))
+        esp.box.Size, esp.box.Position = newVector2(width, height), boxPos
+        esp.box.Color = cfg.espRGBMode and Color3.fromHSV(espRGBHue, 1, 1) or (cfg.espTeamColor and player.Team and player.TeamColor.Color or cfg.espDefaultColor)
+        esp.boxoutline.Size, esp.boxoutline.Position = esp.box.Size, esp.box.Position
+        esp.directionLine.Visible = cfg.espDirectionEnabled and not cfg.streamModeEnabled
+        if esp.directionLine.Visible and humanoidRootPart then
+            local direction = humanoidRootPart.CFrame.LookVector
+            local startPos, endPos = humanoidRootPart.Position, startPos + (direction * 10)
+            local startScreen, startVisible = Camera:WorldToViewportPoint(startPos)
+            local endScreen, endVisible = Camera:WorldToViewportPoint(endPos)
+            if startVisible and endVisible then
+                esp.directionLine.From = newVector2(startScreen.X, startScreen.Y)
+                esp.directionLine.To = newVector2(endScreen.X, endScreen.Y)
+                esp.directionLine.Color, esp.directionLine.Visible = esp.box.Color, true
+            else esp.directionLine.Visible = false end
+        end
+        esp.name.Visible = cfg.espNameEnabled and not cfg.streamModeEnabled
+        if esp.name.Visible then
+            esp.name.Text, esp.name.Position = player.Name, newVector2(x, y - height/2 - 15)
+            esp.name.Color = esp.box.Color
+        end
+        esp.distance.Visible = cfg.espDistanceEnabled and not cfg.streamModeEnabled
+        if esp.distance.Visible then
+            esp.distance.Text = math.floor((humanoidRootPart.Position - Camera.CFrame.Position).Magnitude) .. "m"
+            esp.distance.Position = newVector2(x, y + height/2 + 5)
+        end
+        esp.healthBar.Visible = cfg.espHealthEnabled and not cfg.streamModeEnabled
+        esp.healthBarOutline.Visible = cfg.espHealthEnabled and not cfg.streamModeEnabled
+        if esp.healthBar.Visible then
+            local healthPercent = humanoid.Health / humanoid.MaxHealth
+            local barHeight, barWidth = height * 0.8, 4
+            esp.healthBarOutline.Size = newVector2(barWidth + 2, barHeight + 2)
+            esp.healthBarOutline.Position = newVector2(x - width/2 - 10, y - barHeight/2)
+            esp.healthBar.Size = newVector2(barWidth, barHeight * healthPercent)
+            esp.healthBar.Position = newVector2(x - width/2 - 9, y + barHeight/2 - barHeight * healthPercent)
+            esp.healthBar.Color = Color3.fromRGB(255 * (1 - healthPercent), 255 * healthPercent, 0)
+        end
+        esp.tracer.Visible = cfg.espTracersEnabled and not cfg.streamModeEnabled
+        if esp.tracer.Visible then
+            esp.tracer.From = newVector2(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+            esp.tracer.To, esp.tracer.Color = newVector2(x, y), esp.box.Color
+        end
+        if cfg.espSkeletonEnabled and not cfg.streamModeEnabled then
+            local isR15 = humanoid.RigType == Enum.HumanoidRigType.R15
+            local connections = isR15 and skeletonConnections or r6SkeletonConnections
+            local lineIndex = 1
+            for _, connection in ipairs(connections) do
+                local part1, part2 = character:FindFirstChild(connection[1]), character:FindFirstChild(connection[2])
+                if part1 and part2 then
+                    local pos1, vis1 = Camera:WorldToViewportPoint(part1.Position)
+                    local pos2, vis2 = Camera:WorldToViewportPoint(part2.Position)
+                    if vis1 and vis2 and esp.skeleton[lineIndex] then
+                        esp.skeleton[lineIndex].From = newVector2(pos1.X, pos1.Y)
+                        esp.skeleton[lineIndex].To = newVector2(pos2.X, pos2.Y)
+                        esp.skeleton[lineIndex].Color, esp.skeleton[lineIndex].Visible = esp.box.Color, true
+                    elseif esp.skeleton[lineIndex] then esp.skeleton[lineIndex].Visible = false end
+                elseif esp.skeleton[lineIndex] then esp.skeleton[lineIndex].Visible = false end
+                lineIndex = lineIndex + 1
+            end
+            for i = lineIndex, #esp.skeleton do
+                if esp.skeleton[i] then esp.skeleton[i].Visible = false end
+            end
+        else
+            for _, line in ipairs(esp.skeleton) do if line then line.Visible = false end end
+        end
+    else
+        esp.tracer.Visible,esp.name.Visible,esp.distance.Visible = false,false,false
+        esp.healthBar.Visible,esp.healthBarOutline.Visible,esp.directionLine.Visible = false,false,false
+        for _, line in ipairs(esp.skeleton) do if line then line.Visible = false end end
+    end
+end
+
+for _, player in next, Players:GetPlayers() do
+    if player ~= LocalPlayer then createEsp(player) end
+end
+Players.PlayerAdded:Connect(createEsp)
+Players.PlayerRemoving:Connect(removeEsp)
+
+spawn(function()
+    while true do
+        wait(0.05)
+        if cfg.espRGBMode then
+            espRGBHue = espRGBHue + 0.01
+            if espRGBHue > 1 then espRGBHue = 0 end
+        end
+    end
+end)
+
+local function updateSpeed()
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+        LocalPlayer.Character.Humanoid.WalkSpeed = cfg.walkSpeed
+        LocalPlayer.Character.Humanoid.JumpPower = cfg.jumpPower
+    end
+end
+
+spawn(function()
+    while true do
+        wait(0.1)
+        if not cfg.arsenalSpeedBypass then updateSpeed() end
+    end
+end)
+
+local function setupInfiniteJump()
+    if jumpConnection then jumpConnection:Disconnect() jumpConnection = nil end
+    if cfg.infiniteJumpEnabled then
+        jumpConnection = UserInputService.JumpRequest:Connect(function()
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                LocalPlayer.Character.Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end)
+    end
+end
+
+local function toggleBrightSkins()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player.Character then
+            for _, part in pairs(player.Character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    if cfg.brightSkinsEnabled then
+                        if not brightSkinsOriginalMaterials[part] then
+                            brightSkinsOriginalMaterials[part] = {Material = part.Material, Color = part.Color}
+                        end
+                        part.Material = Enum.Material.Neon
+                        part.Color = player.Team == LocalPlayer.Team and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 0, 0)
+                    else
+                        if brightSkinsOriginalMaterials[part] then
+                            part.Material, part.Color = brightSkinsOriginalMaterials[part].Material, brightSkinsOriginalMaterials[part].Color
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function setupNoclip()
+    if noclipConnection then noclipConnection:Disconnect() noclipConnection = nil end
+    if cfg.noclipEnabled then
+        noclipConnection = RunService.Heartbeat:Connect(function()
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                for _, part in pairs(LocalPlayer.Character:GetDescendants()) do
+                    if part:IsA("BasePart") then part.CanCollide = false end
+                end
+                local humanoid = LocalPlayer.Character:FindFirstChild("Humanoid")
+                if humanoid then humanoid:ChangeState(11) end
+            end
+        end)
+    else
+        if LocalPlayer.Character then
+            for _, part in pairs(LocalPlayer.Character:GetDescendants()) do
+                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                    part.CanCollide = true
+                end
+            end
+        end
+    end
+end
+
+local function toggleStreamMode()
+    if cfg.streamModeEnabled then
+        cfg.espEnabled,cfg.espTracersEnabled,cfg.espSkeletonEnabled = false,false,false
+        cfg.showFOVCircle,cfg.showPerformance = false,false
+        FOVring.Visible,FOVringOutline.Visible = false,false
+        showNotification("STREAM MODE: ON", Color3.fromRGB(100, 100, 255))
+    else
+        cfg.espEnabled = true
+        showNotification("STREAM MODE: OFF", Color3.fromRGB(255, 100, 100))
+    end
+end
+
+local function modifyGuns()
+    if not ReplicatedStorage:FindFirstChild("Weapons") then return end
+    for _, weapon in pairs(ReplicatedStorage.Weapons:GetDescendants()) do
+        if cfg.noRecoilEnabled and (weapon.Name == "RecoilControl" or weapon.Name == "Recoil") then
+            if not originalProperties[weapon] then originalProperties[weapon] = weapon.Value end
+            weapon.Value = 0
+        elseif originalProperties[weapon] and (weapon.Name == "RecoilControl" or weapon.Name == "Recoil") then
+            weapon.Value = originalProperties[weapon]
+        end
+        if cfg.noSpreadEnabled and (weapon.Name == "MaxSpread" or weapon.Name == "Spread" or weapon.Name == "SpreadControl") then
+            if not originalProperties[weapon] then originalProperties[weapon] = weapon.Value end
+            weapon.Value = 0
+        elseif originalProperties[weapon] and (weapon.Name == "MaxSpread" or weapon.Name == "Spread" or weapon.Name == "SpreadControl") then
+            weapon.Value = originalProperties[weapon]
+        end
+        if cfg.fastFireRateEnabled and (weapon.Name == "FireRate" or weapon.Name == "BFireRate") then
+            if not originalProperties[weapon] then originalProperties[weapon] = weapon.Value end
+            weapon.Value = 0.02
+        elseif originalProperties[weapon] and (weapon.Name == "FireRate" or weapon.Name == "BFireRate") then
+            weapon.Value = originalProperties[weapon]
+        end
+    end
+end
+
+local function expandHitbox(player)
+    if not player.Character then return end
+    for _, part in pairs(player.Character:GetChildren()) do
+        if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+            if not hitboxOriginalSizes[part] then
+                hitboxOriginalSizes[part] = part.Size
+            end
+            if cfg.hitboxEnabled then
+                part.Size = Vector3.new(cfg.hitboxSize, cfg.hitboxSize, cfg.hitboxSize)
+                part.Transparency, part.CanCollide = cfg.hitboxTransparency, false
+            else
+                if hitboxOriginalSizes[part] then
+                    part.Size, part.Transparency, part.CanCollide = hitboxOriginalSizes[part], 0, true
+                end
+            end
+        end
+    end
+end
+
+local perfLabel = Drawing.new("Text")
+perfLabel.Visible,perfLabel.Color,perfLabel.Text = false,Color3.fromRGB(0, 255, 0),"FPS: 0 | Ping: 0ms"
+perfLabel.Size,perfLabel.Font,perfLabel.Position = 16,2,Vector2.new(10, 10)
+
+spawn(function()
+    while true do
+        wait(0.1)
+        if cfg.hitboxEnabled then
+            for _, player in pairs(Players:GetPlayers()) do
+                if player ~= LocalPlayer and player.Character then expandHitbox(player) end
+            end
+        end
+        if cfg.brightSkinsEnabled then toggleBrightSkins() end
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    wait(0.5)
+    setupNoclip()
+    setupInfiniteJump()
+    updateSpeed()
+    if cfg.arsenalSpeedBypass then arsenalSpeedHack() end
+end)
+
+local function isEnemy(player)
+    if not player.Team or not LocalPlayer.Team then return true end
+    return player.Team ~= LocalPlayer.Team
+end
+
+local function hasLineOfSight(part, character)
+    if not part or not part.Position or not character then return false end
+    if not cfg.wallCheck then return true end
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character, character}
+    rayParams.FilterType, rayParams.IgnoreWater = Enum.RaycastFilterType.Blacklist, true
+    local origin, targetPosition = Camera.CFrame.Position, part.Position
+    local maxAttempts, attempts = 10, 0
+    while attempts < maxAttempts do
+        attempts = attempts + 1
+        local direction = targetPosition - origin
+        local result = workspace:Raycast(origin, direction, rayParams)
+        if not result then return true end
+        if result.Instance:IsDescendantOf(character) then return true end
+        local hitPart, isInvisibleWall = result.Instance, false
+        if hitPart:IsA("BasePart") then
+            if hitPart.Transparency >= 0.95 or not hitPart.CanCollide then isInvisibleWall = true end
+            local partName = hitPart.Name:lower()
+            if partName:find("invisible") or partName:find("invis") or partName:find("barrier") and hitPart.Transparency > 0.5 then
+                isInvisibleWall = true
+            end
+            if hitPart.Material == Enum.Material.Glass or hitPart.Material == Enum.Material.ForceField then
+                isInvisibleWall = true
+            end
+        end
+        if isInvisibleWall then
+            origin = result.Position + direction.Unit * 0.1
+            local newFilter = {}
+            for _, v in pairs(rayParams.FilterDescendantsInstances) do table.insert(newFilter, v) end
+            table.insert(newFilter, hitPart)
+            rayParams.FilterDescendantsInstances = newFilter
+        else return false end
+    end
+    return false
+end
+
+local function getBestTarget(ignoreCurrent)
+    if not cfg.autoTargetEnabled then return nil, math.huge end
+    local bestPlayer, bestScore = nil, math.huge
+    local screenCenter = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    local currentTargetPart = getTargetPart()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if ignoreCurrent and player == currentTarget then continue end
+        if player.Character and player.Character:FindFirstChild(currentTargetPart) and player.Character:FindFirstChild("Humanoid") and player.Character.Humanoid.Health > 0 then
+            if cfg.teamCheck and not isEnemy(player) then continue end
+            local part = player.Character[currentTargetPart]
+            local dist3D = (part.Position - Camera.CFrame.Position).Magnitude
+            if dist3D > cfg.maxTargetDistance then continue end
+            local isVisible = hasLineOfSight(part, player.Character)
+            if cfg.wallCheck and not isVisible then continue end
+            local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+            local score = dist3D
+            if onScreen then
+                local dist2D = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+                score = dist3D * 0.6 + dist2D * 0.4
+            end
+            if isVisible then score = score * 0.8 end
+            if player == currentTarget then score = score * 0.92 end
+            if score < bestScore then bestScore, bestPlayer = score, player end
+        end
+    end
+    return bestPlayer, bestScore
+end
+
+local function getTargetInFOV()
+    local bestPlayer, bestDist = nil, math.huge
+    local screenCenter = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    local currentTargetPart = getTargetPart()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild(currentTargetPart) and player.Character:FindFirstChild("Humanoid") and player.Character.Humanoid.Health > 0 then
+            if cfg.teamCheck and not isEnemy(player) then continue end
+            local part = player.Character[currentTargetPart]
+            local dist3D = (part.Position - Camera.CFrame.Position).Magnitude
+            if dist3D > cfg.maxTargetDistance then continue end
+            local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if not onScreen then continue end
+            local isVisible = hasLineOfSight(part, player.Character)
+            if cfg.wallCheck and not isVisible then continue end
+            local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+            if dist > cfg.FOVRadius then continue end
+            if dist < bestDist then bestPlayer, bestDist = player, dist end
+        end
+    end
+    return bestPlayer
+end
+
+local function updateTarget()
+    if not cfg.autoTargetEnabled then currentTarget = nil return end
+    local now = tick()
+    if now - lastTargetEvaluation < 0.3 then
+        if currentTarget then
+            local currentTargetPart = getTargetPart()
+            if not currentTarget.Character or not currentTarget.Character:FindFirstChild(currentTargetPart) or not currentTarget.Character:FindFirstChild("Humanoid") or currentTarget.Character.Humanoid.Health <= 0 then
+                currentTarget = nil
+            else
+                local dist = (currentTarget.Character[currentTargetPart].Position - Camera.CFrame.Position).Magnitude
+                if dist > cfg.maxTargetDistance then currentTarget = nil
+                elseif cfg.wallCheck and not hasLineOfSight(currentTarget.Character[currentTargetPart], currentTarget.Character) then
+                    currentTarget = nil
+                end
+            end
+        end
+        return
+    end
+    lastTargetEvaluation = now
+    if currentTarget then
+        local currentTargetPart = getTargetPart()
+        if not currentTarget.Character or not currentTarget.Character:FindFirstChild(currentTargetPart) or not currentTarget.Character:FindFirstChild("Humanoid") or currentTarget.Character.Humanoid.Health <= 0 then
+            currentTarget = nil
+        else
+            local dist = (currentTarget.Character[currentTargetPart].Position - Camera.CFrame.Position).Magnitude
+            if dist > cfg.maxTargetDistance then currentTarget = nil
+            elseif cfg.wallCheck and not hasLineOfSight(currentTarget.Character[currentTargetPart], currentTarget.Character) then
+                currentTarget = nil
+            else
+                local bestPlayer, bestScore = getBestTarget(true)
+                local currentPlayer, currentScore = getBestTarget(false)
+                if bestPlayer and bestScore < currentScore * 0.85 then
+                    currentTarget = bestPlayer
+                end
+                return
+            end
+        end
+    end
+    currentTarget = getBestTarget(false)
+end
+
+RunService:BindToRenderStep("main", Enum.RenderPriority.Camera.Value, function()
+    updateFOVCircle()
+    if cfg.showFOVCircle and not cfg.streamModeEnabled then
+        FOVring.Visible, FOVringOutline.Visible = true, true
+    else
+        FOVring.Visible, FOVringOutline.Visible = false, false
+    end
+    SilentFOV.Visible = cfg.silentAimEnabled and not cfg.streamModeEnabled
+    for player, drawings in next, espCache do
+        if cfg.espTeamCheck and player.Team == LocalPlayer.Team then
+            drawings.box.Visible,drawings.boxoutline.Visible,drawings.tracer.Visible = false,false,false
+            drawings.name.Visible,drawings.distance.Visible = false,false
+            drawings.healthBar.Visible,drawings.healthBarOutline.Visible,drawings.directionLine.Visible = false,false,false
+            for _, skelLine in ipairs(drawings.skeleton) do
+                if skelLine then skelLine.Visible = false end
+            end
+        elseif drawings and player ~= LocalPlayer then
+            updateEsp(player, drawings)
+        end
+    end
+    frameCount = frameCount + 1
+    local now = tick()
+    if now - lastFPSUpdate >= 1 then
+        currentFPS, frameCount, lastFPSUpdate = frameCount, 0, now
+    end
+    if cfg.showPerformance and not cfg.streamModeEnabled then
+        local ping = math.floor(LocalPlayer:GetNetworkPing() * 1000)
+        local memory = math.floor(collectgarbage("count"))
+        local uptime = math.floor(tick() - scriptStartTime)
+        perfLabel.Text = string.format("FPS: %d | Ping: %dms | Mem: %dKB | Up: %ds", currentFPS, ping, memory, uptime)
+        perfLabel.Visible = true
+    else
+        perfLabel.Visible = false
+    end
+    updateRGBGun()
+    if not cfg.aimbotEnabled then return end
+    local fovTarget = getTargetInFOV()
+    if fovTarget and fovTarget.Character then
+        local currentTargetPart = getTargetPart()
+        if fovTarget.Character:FindFirstChild(currentTargetPart) then
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position, fovTarget.Character[currentTargetPart].Position)
+            currentTarget, lastTargetEvaluation = fovTarget, tick()
+            return
+        end
+    end
+    if cfg.autoTargetEnabled then
+        updateTarget()
+        if currentTarget and currentTarget.Character then
+            local currentTargetPart = getTargetPart()
+            if currentTarget.Character:FindFirstChild(currentTargetPart) then
+                local targetPos = currentTarget.Character[currentTargetPart].Position
+                if cfg.fullLockEnabled then
+                    Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetPos)
+                else
+                    local currentCFrame = Camera.CFrame
+                    local targetCFrame = CFrame.new(currentCFrame.Position, targetPos)
+                    Camera.CFrame = currentCFrame:Lerp(targetCFrame, cfg.lerpSpeed)
+                end
+            end
+        end
+    end
+end)
+
+arsenalSpeedHack()
+
+--// UI
+local sg = Instance.new("ScreenGui")
+sg.ResetOnSpawn, sg.Name, sg.Parent = false, "F4V0R", LocalPlayer:WaitForChild("PlayerGui")
+
+local ib = Instance.new("TextButton")
+ib.Size, ib.Position = UDim2.new(0,36,0,36), UDim2.new(0.02,0,0.25,0)
+ib.Text, ib.ZIndex = ">", 10
+ib.BackgroundColor3, ib.BorderSizePixel = Color3.fromRGB(25,25,35), 0
+ib.TextColor3, ib.Font, ib.TextSize, ib.Parent = Color3.fromRGB(255,140,0), Enum.Font.Arcade, 18, sg
+local ic = Instance.new("UICorner")
+ic.CornerRadius, ic.Parent = UDim.new(0,8), ib
+local is = Instance.new("UIStroke")
+is.Thickness, is.ApplyStrokeMode, is.Color, is.Parent = 2, Enum.ApplyStrokeMode.Border, Color3.fromRGB(255,140,0), ib
+
+local mf = Instance.new("Frame")
+mf.Size, mf.Position = UDim2.new(0,0,0,320), UDim2.new(0,10,0.5,-160)
+mf.BackgroundColor3, mf.BorderSizePixel, mf.Visible, mf.Parent = Color3.fromRGB(15,15,20), 0, false, sg
+local mc = Instance.new("UICorner")
+mc.CornerRadius, mc.Parent = UDim.new(0,10), mf
+local ms = Instance.new("UIStroke")
+ms.Thickness, ms.ApplyStrokeMode, ms.Parent = 3, Enum.ApplyStrokeMode.Border, mf
+
+local colors = {Color3.fromRGB(255,140,0),Color3.fromRGB(255,165,0),Color3.fromRGB(255,100,0),Color3.fromRGB(128,0,128),Color3.fromRGB(75,0,130),Color3.fromRGB(255,215,0),Color3.fromRGB(255,255,0)}
+local cIdx, nIdx, lerpV = 1, 2, 0
+RunService.RenderStepped:Connect(function()
+    lerpV = lerpV + 0.03
+    if lerpV >= 1 then lerpV, cIdx, nIdx = 0, nIdx, cIdx % #colors + 1 end
+    local c1, c2 = colors[cIdx], colors[nIdx]
+    local r = c1.R + (c2.R - c1.R) * lerpV
+    local g = c1.G + (c2.G - c1.G) * lerpV
+    local b = c1.B + (c2.B - c1.B) * lerpV
+    ms.Color, is.Color = Color3.new(r,g,b), Color3.new(r,g,b)
+end)
+
+local hd = Instance.new("Frame")
+hd.Size, hd.Position = UDim2.new(1,0,0,28), UDim2.new(0,0,0,0)
+hd.BackgroundColor3, hd.BorderSizePixel, hd.Parent = Color3.fromRGB(20,20,28), 0, mf
+local hdc = Instance.new("UICorner")
+hdc.CornerRadius, hdc.Parent = UDim.new(0,10), hd
+
+local logo = Instance.new("TextLabel")
+logo.Size, logo.Position, logo.BackgroundTransparency = UDim2.new(0.7,0,1,0), UDim2.new(0,6,0,0), 1
+logo.Text, logo.TextColor3 = "F4V0R", Color3.fromRGB(255,140,0)
+logo.Font, logo.TextSize, logo.TextXAlignment, logo.Parent = Enum.Font.Arcade, 12, Enum.TextXAlignment.Left, hd
+
+local ver = Instance.new("TextLabel")
+ver.Size, ver.Position, ver.BackgroundTransparency = UDim2.new(0.3,0,1,0), UDim2.new(0.7,0,0,0), 1
+ver.Text, ver.TextColor3 = "v2", Color3.fromRGB(128,0,128)
+ver.Font, ver.TextSize, ver.TextXAlignment, ver.Parent = Enum.Font.Arcade, 9, Enum.TextXAlignment.Right, hd
+
+local tc = Instance.new("Frame")
+tc.Size, tc.Position, tc.BackgroundTransparency, tc.Parent = UDim2.new(1,-6,0,26), UDim2.new(0,3,0,31), 1, mf
+
+local cc = Instance.new("Frame")
+cc.Size, cc.Position, cc.BackgroundTransparency, cc.Parent = UDim2.new(1,-6,1,-63), UDim2.new(0,3,0,60), 1, mf
+
+local pages, tabs = {}, {}
+
+local function createTab(name)
+    local tb = Instance.new("TextButton")
+    tb.Size, tb.Position = UDim2.new(0.2,-1,1,0), UDim2.new(0.2*#tabs,1,0,0)
+    tb.BackgroundColor3, tb.BorderSizePixel, tb.Text = Color3.fromRGB(35,35,45), 0, name
+    tb.TextColor3, tb.Font, tb.TextSize, tb.Parent = Color3.fromRGB(150,150,150), Enum.Font.Arcade, 8, tc
+    local tbc = Instance.new("UICorner")
+    tbc.CornerRadius, tbc.Parent = UDim.new(0,5), tb
+    
+    local pg = Instance.new("ScrollingFrame")
+    pg.Size, pg.BackgroundTransparency, pg.BorderSizePixel = UDim2.new(1,0,1,0), 1, 0
+    pg.ScrollBarThickness, pg.CanvasSize = 3, UDim2.new(0,0,0,600)
+    pg.Visible, pg.Parent = false, cc
+    local ly = Instance.new("UIListLayout")
+    ly.Padding, ly.Parent = UDim.new(0,4), pg
+    
+    tb.MouseButton1Click:Connect(function()
+        for _, p in pairs(pages) do p.Visible = false end
+        for _, t in pairs(tabs) do 
+            t.TextColor3, t.BackgroundColor3 = Color3.fromRGB(150,150,150), Color3.fromRGB(35,35,45) 
+        end
+        pg.Visible = true
+        tb.TextColor3, tb.BackgroundColor3 = Color3.fromRGB(255,140,0), Color3.fromRGB(50,50,65)
+    end)
+    
+    table.insert(tabs, tb)
+    table.insert(pages, pg)
+    return pg
+end
+
+local function createToggle(parent, name, default, callback)
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1,-2,0,24)
+    container.BackgroundColor3, container.BorderSizePixel, container.Parent = Color3.fromRGB(25,25,35), 0, parent
+    local cc = Instance.new("UICorner")
+    cc.CornerRadius, cc.Parent = UDim.new(0,5), container
+    local cs = Instance.new("UIStroke")
+    cs.Thickness, cs.ApplyStrokeMode = 1.5, Enum.ApplyStrokeMode.Border
+    cs.Color, cs.Transparency, cs.Parent = Color3.fromRGB(40,40,50), 0, container
+    
+    local label = Instance.new("TextLabel")
+    label.Size, label.Position, label.BackgroundTransparency = UDim2.new(0.52,0,1,0), UDim2.new(0,4,0,0), 1
+    label.Text, label.TextColor3 = name, Color3.fromRGB(220,220,220)
+    label.Font, label.TextSize = Enum.Font.Arcade, 9
+    label.TextXAlignment, label.Parent = Enum.TextXAlignment.Left, container
+    
+    local status = Instance.new("TextLabel")
+    status.Size, status.Position, status.BackgroundTransparency = UDim2.new(0,40,0,16), UDim2.new(1,-43,0.5,-8), 0
+    status.BackgroundColor3 = default and Color3.fromRGB(255,140,0) or Color3.fromRGB(60,60,75)
+    status.BorderSizePixel, status.Text = 0, default and "ON" or "OFF"
+    status.TextColor3, status.Font, status.TextSize, status.Parent = Color3.fromRGB(255,255,255), Enum.Font.Arcade, 10, container
+    local stc = Instance.new("UICorner")
+    stc.CornerRadius, stc.Parent = UDim.new(0,4), status
+    
+    local btn = Instance.new("TextButton")
+    btn.Size, btn.BackgroundTransparency, btn.Text, btn.Parent = UDim2.new(1,0,1,0), 1, "", container
+    
+    local state = default
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        callback(state)
+        status.BackgroundColor3 = state and Color3.fromRGB(255,140,0) or Color3.fromRGB(60,60,75)
+        status.Text = state and "ON" or "OFF"
+        cs.Color = state and Color3.fromRGB(255,140,0) or Color3.fromRGB(40,40,50)
+    end)
+    
+    if default then cs.Color = Color3.fromRGB(255,140,0) end
+    return container
+end
+
+local function createTextbox(parent, name, default, callback)
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1,-2,0,36)
+    container.BackgroundColor3, container.BorderSizePixel, container.Parent = Color3.fromRGB(25,25,35), 0, parent
+    local cc = Instance.new("UICorner")
+    cc.CornerRadius, cc.Parent = UDim.new(0,5), container
+    local cs = Instance.new("UIStroke")
+    cs.Thickness, cs.ApplyStrokeMode, cs.Color, cs.Parent = 1.5, Enum.ApplyStrokeMode.Border, Color3.fromRGB(40,40,50), container
+    
+    local label = Instance.new("TextLabel")
+    label.Size, label.Position, label.BackgroundTransparency = UDim2.new(1,-10,0,13), UDim2.new(0,5,0,2), 1
+    label.Text, label.TextColor3 = name, Color3.fromRGB(200,200,200)
+    label.Font, label.TextSize = Enum.Font.Arcade, 8
+    label.TextXAlignment, label.Parent = Enum.TextXAlignment.Left, container
+    
+    local textbox = Instance.new("TextBox")
+    textbox.Size, textbox.Position = UDim2.new(1,-10,0,17), UDim2.new(0,5,1,-19)
+    textbox.BackgroundColor3, textbox.BorderSizePixel, textbox.Text = Color3.fromRGB(40,40,55), 0, tostring(default)
+    textbox.TextColor3, textbox.Font, textbox.TextSize, textbox.Parent = Color3.fromRGB(255,140,0), Enum.Font.Arcade, 10, container
+    local tbc = Instance.new("UICorner")
+    tbc.CornerRadius, tbc.Parent = UDim.new(0,4), textbox
+    
+    textbox.FocusLost:Connect(function()
+        local value = tonumber(textbox.Text)
+        if value then
+            value = math.clamp(value, 0, 100)
+            callback(value)
+            textbox.Text = tostring(math.floor(value))
+        else
+            textbox.Text = tostring(default)
+        end
+    end)
+    
+    return container
+end
+
+local aimPage = createTab("AIM")
+local visPage = createTab("VIS")
+local gunPage = createTab("GUN")
+local movPage = createTab("MOV")
+local mscPage = createTab("MSC")
+
+pages[1].Visible = true
+tabs[1].TextColor3, tabs[1].BackgroundColor3 = Color3.fromRGB(255,140,0), Color3.fromRGB(50,50,65)
+
+-- AIM TAB
+createToggle(aimPage, "Aimbot Enabled", cfg.aimbotEnabled, function(v)
+    cfg.aimbotEnabled = v
+    showNotification("Aimbot: " .. (v and "ON" or "OFF"), v and Color3.fromRGB(0,255,100) or Color3.fromRGB(255,100,100))
+end)
+createToggle(aimPage, "Silent Aim", cfg.silentAimEnabled, function(v) cfg.silentAimEnabled = v end)
+createTextbox(aimPage, "Silent Aim FOV", cfg.silentAimFOV, function(v) cfg.silentAimFOV = v SilentFOV.Radius = v end)
+createToggle(aimPage, "Auto Target Lock", cfg.autoTargetEnabled, function(v) cfg.autoTargetEnabled = v end)
+createToggle(aimPage, "Force Headshots", cfg.alwaysHeadshot, function(v) cfg.alwaysHeadshot = v end)
+createTextbox(aimPage, "Headshot Chance %", cfg.headshotChance, function(v) cfg.headshotChance = v end)
+createToggle(aimPage, "Show FOV Circle", cfg.showFOVCircle, function(v) cfg.showFOVCircle = v end)
+createTextbox(aimPage, "FOV Circle Size", cfg.FOVRadius, function(v) cfg.FOVRadius = v end)
+
+-- VISUALS TAB
+createToggle(visPage, "ESP Boxes", cfg.espEnabled, function(v) cfg.espEnabled = v end)
+createToggle(visPage, "Player Names", cfg.espNameEnabled, function(v) cfg.espNameEnabled = v end)
+createToggle(visPage, "Distance Label", cfg.espDistanceEnabled, function(v) cfg.espDistanceEnabled = v end)
+createToggle(visPage, "Health Bars", cfg.espHealthEnabled, function(v) cfg.espHealthEnabled = v end)
+createToggle(visPage, "Tracers", cfg.espTracersEnabled, function(v) cfg.espTracersEnabled = v end)
+createToggle(visPage, "Skeleton ESP", cfg.espSkeletonEnabled, function(v) cfg.espSkeletonEnabled = v end)
+createToggle(visPage, "Direction Lines", cfg.espDirectionEnabled, function(v) cfg.espDirectionEnabled = v end)
+createToggle(visPage, "RGB ESP Mode", cfg.espRGBMode, function(v) cfg.espRGBMode = v end)
+createToggle(visPage, "Neon Skins", cfg.brightSkinsEnabled, function(v) cfg.brightSkinsEnabled = v toggleBrightSkins() end)
+
+-- WEAPONS TAB
+createToggle(gunPage, "No Recoil", cfg.noRecoilEnabled, function(v) cfg.noRecoilEnabled = v modifyGuns() end)
+createToggle(gunPage, "No Spread", cfg.noSpreadEnabled, function(v) cfg.noSpreadEnabled = v modifyGuns() end)
+createToggle(gunPage, "Fast Fire Rate", cfg.fastFireRateEnabled, function(v) cfg.fastFireRateEnabled = v modifyGuns() end)
+createToggle(gunPage, "Rainbow Gun", cfg.rainbowGunEnabled, function(v) cfg.rainbowGunEnabled = v end)
+createToggle(gunPage, "Infinite Ammo", cfg.infiniteAmmoV1, function(v) cfg.infiniteAmmoV1 = v end)
+createToggle(gunPage, "Hitbox Expander", cfg.hitboxEnabled, function(v) cfg.hitboxEnabled = v end)
+createTextbox(gunPage, "Hitbox Size", cfg.hitboxSize, function(v) cfg.hitboxSize = v end)
+
+-- MOVEMENT TAB
+createToggle(movPage, "Speed Hack", cfg.speedEnabled, function(v)
+    cfg.speedEnabled = v
+    cfg.walkSpeed = v and cfg.fastSpeed or cfg.defaultSpeed
+    updateSpeed()
+end)
+createTextbox(movPage, "Speed Value", cfg.fastSpeed, function(v) cfg.fastSpeed = v end)
+createTextbox(movPage, "Jump Power", cfg.jumpPower, function(v) cfg.jumpPower = v updateSpeed() end)
+createToggle(movPage, "Noclip", cfg.noclipEnabled, function(v) cfg.noclipEnabled = v setupNoclip() end)
+
+-- MISC TAB
+createToggle(mscPage, "🥔 Potato", cfg.potatoMode, function(v) cfg.potatoMode = v togglePotatoMode() end)
+createToggle(mscPage, "Streamer Mode", cfg.streamModeEnabled, function(v) cfg.streamModeEnabled = v toggleStreamMode() end)
+createToggle(mscPage, "Performance", cfg.showPerformance, function(v) cfg.showPerformance = v end)
+
+local arsenalLabel = Instance.new("Frame")
+arsenalLabel.Size = UDim2.new(1,-2,0,24)
+arsenalLabel.BackgroundColor3, arsenalLabel.BorderSizePixel, arsenalLabel.Parent = Color3.fromRGB(0,128,0), 0, mscPage
+local alc = Instance.new("UICorner")
+alc.CornerRadius, alc.Parent = UDim.new(0,5), arsenalLabel
+local alt = Instance.new("TextLabel")
+alt.Size, alt.BackgroundTransparency = UDim2.new(1,0,1,0), 1
+alt.Text, alt.TextColor3 = "Arsenal Bypass: ACTIVE", Color3.fromRGB(255,255,255)
+alt.Font, alt.TextSize, alt.Parent = Enum.Font.Arcade, 9, arsenalLabel
+
+local menuOpen = false
+ib.MouseButton1Click:Connect(function()
+    menuOpen = not menuOpen
+    if menuOpen then
+        mf.Visible = true
+        mf:TweenSize(UDim2.new(0,180,0,320), Enum.EasingDirection.Out, Enum.EasingStyle.Back, 0.35, true)
+        ib.Text = "<"
+    else
+        mf:TweenSize(UDim2.new(0,0,0,320), Enum.EasingDirection.Out, Enum.EasingStyle.Back, 0.3, true, function()
+            mf.Visible = false
+        end)
+        ib.Text = ">"
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.Q then
+        cfg.aimbotEnabled = not cfg.aimbotEnabled
+        showNotification("Aimbot: " .. (cfg.aimbotEnabled and "ON" or "OFF"), cfg.aimbotEnabled and Color3.fromRGB(0,255,100) or Color3.fromRGB(255,100,100))
+    elseif input.KeyCode == Enum.KeyCode.Delete then
+        cfg.aimbotEnabled, cfg.espEnabled, cfg.silentAimEnabled = false, false, false
+        currentTarget = nil
+        FOVring.Visible, FOVringOutline.Visible = false, false
+        showNotification("⚠️ PANIC", Color3.fromRGB(255,50,50))
+    end
+end)
+
+setupNoclip()
+setupInfiniteJump()
+updateSpeed()
+showNotification("F4V0R Aimbot v2 Loaded", Color3.fromRGB(255,140,0))
+
